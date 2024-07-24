@@ -6,19 +6,23 @@ import pymysql
 from functools import wraps
 
 class DBM:
-    def __init__(self, db_name, host='localhost', port=3306, user='root', password='4303', charset='utf8'):
+    def __init__(self, db_name):
         self.db = db_name
         self.logger = Logger().get_logger(module_name='modules.data.dbm')
-        self.connection_params = {
-            'host': host,
-            'port': port,
-            'user': user,
-            'password': password,
-            'charset': charset
-        }
         
+        with open('./config/db/connection_configs.json', 'r') as config:
+            self.connection_config = json.load(config)
+            
         with open('./config/db/table_configs.json', 'r', encoding='utf8') as config:
             self.tbl_config = json.load(config)
+        
+        self.connection_params = {
+            'host': self.connection_config['host'],
+            'port': int(self.connection_config['port']),
+            'user': self.connection_config['user'],
+            'password': self.connection_config['password'],
+            'charset': self.connection_config['charset']
+        }
         
     def db_operation(create_db=False):
         def decorator(func):
@@ -112,6 +116,19 @@ class DBM:
         except Exception as e:
             self.logger.error(f"Error inserting data to {tbl_name} : {str(e)}.")
             
+    @db_operation(create_db=False)
+    def import_data(self, tbl_name, call_cols, limit=1000000, query=None):
+        if query is None:
+            query = f"SELECT {call_cols} FROM {tbl_name} LIMIT %s"
+        else:
+            query = query
+        try:
+            self.cursor.execute(query, (limit,))
+            data = self.cursor.fetchall()
+            self.logger.info(f"Import {len(data)} rows from {tbl_name}.")
+        except Exception as e:
+            self.logger.error(f"Error importing data from {tbl_name} : {str(e)}.")
+        
 if __name__ == '__main__':
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from util.logger import Logger
@@ -125,10 +142,12 @@ if __name__ == '__main__':
     dbm.set_fk(fk_tbl_name='trade', pk_tbl_name='district_code', fk_col_name='region_code', pk_col_name='region_code', const_name='fk_trade')
     dbm.set_fk(fk_tbl_name='total_district_code', pk_tbl_name='district_code', fk_col_name='region_code', pk_col_name='region_code', const_name='fk_total_district_code')
     
-    district_code = pd.read_csv('./documents/district_code.csv', encoding='cp949')
+    district_code = pd.read_csv('./documents/district_code_src/district_code.csv', encoding='cp949')
+    district_code = district_code.where(pd.notnull(district_code), None)
     district_code = district_code.values.tolist()
-    total_district_code = pd.read_csv('./documents/total_district_code.csv', encoding='cp949')
-    total_district_code = total_district_code.where(pd.notnull(total_district_code), None)
+
+    total_district_code = pd.read_csv('./documents/district_code_src/total_district_code.csv', encoding='cp949')
+    total_district_code = total_district_code.where((pd.notnull(total_district_code)), None)
     total_district_code = total_district_code.values.tolist()
     dbm.insert_data('district_code', district_code)
     dbm.insert_data('total_district_code', total_district_code)
