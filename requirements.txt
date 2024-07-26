@@ -10,6 +10,7 @@ idna==3.7
 importlib_resources==6.4.0
 joblib==1.4.2
 kiwisolver==1.4.5
+lxml==5.2.2
 matplotlib==3.7.5
 numpy==1.24.4
 packaging==24.1
