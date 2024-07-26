@@ -1,14 +1,19 @@
 import re
+import os
+import sys
 import json
 import time
 import requests
+import datetime as dt
 
-from datetime import datetime
 from bs4 import BeautifulSoup
 
-from data.dbm import DBM
-from util.logger import Logger
-from util.utils import *
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(ROOT_DIR)
+
+from modules.util.logger import Logger
+from modules.util.utils import *
+from modules.data.dbm import DBM
 
 class Crawler:
     def __init__(self, db_name, import_tbl_name, start_year, end_year):
@@ -17,29 +22,65 @@ class Crawler:
         self.logger = Logger().get_logger(module_name='modules.data.crawler')
         self.start_year = start_year
         self.end_year = end_year
-        self.district_code = self.dbm.import_data(tbl_name=self.import_tbl_name, call_cols=self.tbl_config[self.import_tbl_name]['list'])
         
         with open('./config/openapi/openapi_configs.json', 'r') as config:
             self.api_config = json.load(config)
             
-        with open('./configs/db/table_configs.json', 'r') as config:
+        with open('./config/db/table_configs.json', 'r', encoding='utf8') as config:
             self.tbl_config = json.load(config)
+            
+        self.district_code = self.dbm.import_data(tbl_name=self.import_tbl_name, call_cols=self.tbl_config[self.import_tbl_name]['list'])
+        self.service_keys = self.api_config['service_key']
+        self.key_usage = {key: 0 for key in self.service_keys}
+        self.current_key_idx = 0
+        self.last_reset_date = dt.datetime.now().date()
+        self.progress_file = './config/openapi/api_progress.json'
+        self.load_progress()
+        
+    def load_progress(self):
+        try:
+            if os.stat(self.progress_file).st_size == 0:
+                self.progress = {'last_district': 0, 'last_date': 0}
+            else:
+                with open(self.progress_file, 'r') as f:
+                    self.progress = json.load(f)
+        except FileNotFoundError:
+            self.progress = {'last_district': 0, 'last_date': 0}
+        except json.JSONDecodeError:
+            self.progress = {'last_district': 0, 'last_date': 0}
+            
+    def save_progress(self):
+        with open(self.progress_file, 'w') as f:
+            json.dump(self.progress, f)
+            
+    def get_next_service_key(self):
+        self.current_key_idx = (self.current_key_idx + 1) % len(self.service_keys)
+        
+        return self.service_keys[self.current_key_idx]
+    
+    def reset_key_usage(self):
+        today = dt.datetime.now().date()
+        if today > self.last_reset_date:
+            self.key_usage = {key: 0 for key in self.service_keys}
+            self.last_reset_date = today
+            
+    def wait_next_day(self):
+        tomorrow = dt.datetime.now() + dt.timedelta(days=1)
+        wait_time = (tomorrow.replace(hour=0, minute=0, second=0, microsecond=0) - dt.datetime.now()).total_seconds()
+        time.sleep(wait_time)
+        self.reset_key_usage()
+        self.logger.info(f"Daily limit reached for all keys. Waiting until midnight ({round(wait_time / 3600, 1)}).")
             
     def set_query_list(self):
         date_list = date_generator(self.start_year, self.end_year)
-                
+        
         query_cnt = 0
         query_list = []
         try:
-            for district in range(len(self.district_code)):
-                for date in range(len(date_list)):
-                    if date_list[date][0:4] in ('2023'):
-                        service_key = self.api_config['service_key'][0]
-                    elif date_list[date][0:4] in ('2022'):
-                        service_key = self.api_config['service_key'][1]
-                    elif date_list[date][0:4] in ('2021'):
-                        service_key = self.api_config['service_key'][2]
-                        
+            for district in range(self.progress['last_district'], len(self.district_code)):
+                for date in range(self.progress['last_date'], len(date_list)):
+                    service_key = self.get_next_service_key()
+                    
                     query_params = (
                         self.api_config['service_url'] +
                         'LAWD_CD=' + str(self.district_code[district][0]) +
@@ -50,6 +91,10 @@ class Crawler:
                     
                     query_cnt += 1
                     query_list.append(query_params)
+                
+                self.progress['last_district'] = district
+                self.progress['last_date'] = 0
+                self.save_progress()
                 
                 district_length = len(self.district_code)
                 district_index = district + 1
@@ -62,9 +107,20 @@ class Crawler:
             self.logger.error(f"Error setting query lists : {str(e)}.")
             
     def api_pipeline(self, query):
+        self.reset_key_usage()
+        
+        current_key = self.service_keys[self.current_key_idx]
+        if self.key_usage[current_key] >= 1000:
+            if all(usage >= 1000 for usage in self.key_usage.values()):
+                self.wait_next_day()
+            else:
+                current_key = self.get_next_service_key()
+        
         response = requests.get(query)
         response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'xml')
+        self.key_usage[current_key] += 1
+        
+        soup = BeautifulSoup(response.content, 'lxml-xml')
         item_list = soup.find_all('item')
         result_list = soup.find_all('header')
         
@@ -72,18 +128,19 @@ class Crawler:
         
         insert_data_cnt = 0
         insert_list = []
-        
-        for result in result_list:
-            result_code = result.find('resultCode').string.strip()
-            result_msg = result.find('resultMsg').string.strip()
-            self.logger.info(f"OpenAPI response code and msg : {result_code}, {result_msg}.")
-            
-            for item in range(len(item_list)):
-                insert = self.preprocessing(item)
-                insert_list.append(insert)
-                insert_data_cnt += 1
+        try:
+            for result in result_list:
+                result_code = result.find('resultCode').string.strip()
+                result_msg = result.find('resultMsg').string.strip()
                 
-        return insert_list, insert_data_cnt
+                for item in item_list:
+                    insert = self.preprocessing(item)
+                    insert_list.append(insert)
+                    insert_data_cnt += 1
+                    
+            return insert_list, insert_data_cnt
+        except Exception as e:
+            self.logger.error(f"OpenAPI response code and msg : {result_code}, {result_msg}.")
     
     def preprocessing(self, item):
         year = int(item.find('년').string.strip())
@@ -97,57 +154,66 @@ class Crawler:
         con_year = int(item.find('건축년도').string.strip())
         apt_name = re.sub(r'\(.*?\)', '', str(item.find('아파트').string.strip()))
         floor = abs(int(item.find('층').string.strip()))
-        apt_dong = int(item.find('동').string.strip())
+        apt_dong = item.find('동').string.strip()
         
         for idx in range(len(self.district_code)):
-            if code == self.district_code[idx][0]:     
-                sigungu = self.district_code[idx][2]
-                addr_1 = self.district_code[idx][3]
-                addr_2 = self.district_code[idx][4]
-                
-                region_code = code
-                contract_dte = datetime(year, month, day).strftime('%Y-%m-%d')
-                district = sigungu
-                cd_district = addr_1
-                con_year = con_year
-                address = addr_2 + ' ' + dong_name + ' ' + jibun + ' ' + apt_name
-                apt_name = apt_name
-                apt_dong = apt_dong
-                floor = floor
-                area = area
-                price = price
-                price_unit = float(price) / 10000
-                py = round((float(price) / area) * 3.3, 0)
-                py_unit = py / 10000
-                
-                schemas = [
-                    region_code, contract_dte, district, cd_district, con_year, address,
-                    apt_name, apt_dong, floor, area, price, price_unit, py, py_unit
-                ]
-                
-                return schemas
+            try:
+                if code == self.district_code[idx][0]:     
+                    sigungu = self.district_code[idx][2]
+                    addr_1 = self.district_code[idx][3]
+                    addr_2 = self.district_code[idx][4]
+                    
+                    region_code = code
+                    contract_dte = dt.datetime(year, month, day).strftime('%Y-%m-%d')
+                    district = sigungu
+                    cd_district = addr_1
+                    con_year = con_year
+                    address = addr_2 + ' ' + dong_name + ' ' + jibun + ' ' + apt_name
+                    apt_name = apt_name
+                    apt_dong = apt_dong
+                    floor = floor
+                    area = area
+                    price = price
+                    price_unit = float(price) / 10000
+                    py = round((float(price) / area) * 3.3, 0)
+                    py_unit = py / 10000
+                    
+                    schemas = [
+                        region_code, contract_dte, district, cd_district, con_year, address,
+                        apt_name, apt_dong, floor, area, price, price_unit, py, py_unit
+                    ]
+                    
+                    return schemas
+            except ValueError as e:
+                self.logger.error(f"ValueError for district code at index {idx}: {e}")
+            except IndexError as e:
+                self.logger.error(f"IndexError for district code at index {idx}: {e}")
                 
     def insert_to_db(self, tbl):
         query_list = self.set_query_list()
         observe_data_cnt = 0
         
         for idx, query in enumerate(query_list):
-            query_length = len(query_length)
+            query_length = len(query_list)
             query_index = idx + 1
             
             try:
                 insert_list, insert_data_cnt = self.api_pipeline(query=query)
                 self.dbm.insert_data(tbl_name=tbl, data_list=insert_list)
                 observe_data_cnt += insert_data_cnt
-                
                 self.logger.info(f"Processing : [{query_index} / {query_length}] \t Inserted : [{insert_data_cnt}] \t Observed : [{observe_data_cnt}]")
+                
+                self.progress['last_date'] += 1
+                self.save_progress()
+                
             except Exception as e:
                 if isinstance(e, AttributeError):
-                    self.logger.error(f"{str(e)}.")
+                    self.logger.error(f"AttributeError : {str(e)}.")
                 elif isinstance(e, ValueError):
-                    self.logger.error(f"{str(e)}.")
+                    self.logger.error(f"ValueError : {str(e)}.")
                 else:
                     self.logger.error(f"Error inserting data to database : {str(e)}.")
             
 if __name__ == '__main__':
-    pass
+    pipeline = Crawler('atamDB', 'district_code', 2020, 2023)
+    pipeline.insert_to_db('trade')
