@@ -3,7 +3,14 @@ import sys
 import json
 import pymysql
 
+import pandas as pd
+
 from functools import wraps
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(ROOT_DIR)
+
+from modules.util.logger import Logger
 
 class DBM:
     def __init__(self, db_name):
@@ -42,7 +49,7 @@ class DBM:
                     self.conn = pymysql.connect(**self.connection_params, db=self.db)
                     self.cursor = self.conn.cursor()
                     
-                    self.logger.info(f"Connect to database {self.db}.")
+                    # self.logger.info(f"Connect to database {self.db}.")
                     
                     result = func(self, *args, **kwargs)
                     return result
@@ -118,6 +125,7 @@ class DBM:
             
     @db_operation(create_db=False)
     def import_data(self, tbl_name, call_cols, limit=1000000, query=None):
+        call_cols = ", ".join(call_cols)
         if query is None:
             query = f"SELECT {call_cols} FROM {tbl_name} LIMIT %s"
         else:
@@ -126,13 +134,12 @@ class DBM:
             self.cursor.execute(query, (limit,))
             data = self.cursor.fetchall()
             self.logger.info(f"Import {len(data)} rows from {tbl_name}.")
+            
+            return data
         except Exception as e:
             self.logger.error(f"Error importing data from {tbl_name} : {str(e)}.")
         
 if __name__ == '__main__':
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from util.logger import Logger
-    import pandas as pd
     dbm = DBM(db_name='atamDB')
     
     tbl_list = ['trade', 'total_district_code', 'district_code']
@@ -151,5 +158,3 @@ if __name__ == '__main__':
     total_district_code = total_district_code.values.tolist()
     dbm.insert_data('district_code', district_code)
     dbm.insert_data('total_district_code', total_district_code)
-else:
-    from ..util.logger import Logger
