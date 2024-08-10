@@ -36,6 +36,7 @@ class APIManager:
     def __init__(self, service_keys: List[str]):
         self.service_keys = service_keys
         self.key_usage = {key: 0 for key in self.service_keys}
+        self.max_key_usage = 10000
         self.current_key_idx = 0
         self.last_reset_date = dt.datetime.now().date()
         self.logger = Logger().get_logger(module_name='modules.data.crawler')
@@ -127,8 +128,8 @@ class Crawler:
         self.api_manager.reset_key_usage()
 
         current_key = self.api_manager.service_keys[self.api_manager.current_key_idx]
-        if self.api_manager.key_usage[current_key] >= 1000:
-            if all(usage >= 1000 for usage in self.api_manager.key_usage.values()):
+        if self.api_manager.key_usage[current_key] >= self.api_manager.max_key_usage:
+            if all(usage >= self.api_manager.max_key_usage for usage in self.api_manager.key_usage.values()):
                 self.api_manager.wait_next_day()
             else:
                 current_key = self.api_manager.get_next_service_key()
@@ -267,6 +268,6 @@ class Crawler:
         self.logger.info(f"Total queries processed: {query_length}, Total data inserted: {observe_data_cnt}")
 
 if __name__ == '__main__':
-    config = Config(DB_NAME='atamDB', IMPORT_TBL_NAME='district_code', START_YEAR=2020, END_YEAR=2023)
+    config = Config(DB_NAME='atamDB', IMPORT_TBL_NAME='district_code', START_YEAR=2017, END_YEAR=2023)
     pipeline = Crawler(config)
     pipeline.insert_to_db('trade')
