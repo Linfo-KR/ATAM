@@ -6,6 +6,9 @@ import pymysql
 import pandas as pd
 
 from functools import wraps
+from sqlalchemy import create_engine
+
+import pymysql.cursors
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(ROOT_DIR)
@@ -28,8 +31,10 @@ class DBM:
             'port': int(self.connection_config['port']),
             'user': self.connection_config['user'],
             'password': self.connection_config['password'],
-            'charset': self.connection_config['charset']
+            'database': self.db
         }
+        
+        self.engine = create_engine(f"mysql+pymysql://{self.connection_params['user']}:{self.connection_params['password']}@{self.connection_params['host']}:{self.connection_params['port']}/{self.connection_params['database']}")
         
     def db_operation(create_db=False):
         def decorator(func):
@@ -124,20 +129,21 @@ class DBM:
             self.logger.error(f"Error inserting data to {tbl_name} : {str(e)}.")
             
     @db_operation(create_db=False)
-    def import_data(self, tbl_name, call_cols, limit=1000000, query=None):
-        call_cols = ", ".join(call_cols)
+    def import_data(self, tbl_name, call_cols, limit=1000000, dates=None, query=None):
+        if call_cols:
+            call_cols = ", ".join(call_cols)
         if query is None:
-            query = f"SELECT {call_cols} FROM {tbl_name} LIMIT %s"
+            query = f"SELECT {call_cols} FROM {tbl_name} LIMIT {limit}"
         else:
             query = query
         try:
-            self.cursor.execute(query, (limit,))
-            data = self.cursor.fetchall()
+            data = pd.read_sql(query, self.engine, parse_dates=dates)
             self.logger.info(f"Import {len(data)} rows from {tbl_name}.")
             
             return data
         except Exception as e:
             self.logger.error(f"Error importing data from {tbl_name} : {str(e)}.")
+            return None
         
 if __name__ == '__main__':
     dbm = DBM(db_name='atamDB')
@@ -149,11 +155,11 @@ if __name__ == '__main__':
     dbm.set_fk(fk_tbl_name='trade', pk_tbl_name='district_code', fk_col_name='region_code', pk_col_name='region_code', const_name='fk_trade')
     dbm.set_fk(fk_tbl_name='total_district_code', pk_tbl_name='district_code', fk_col_name='region_code', pk_col_name='region_code', const_name='fk_total_district_code')
     
-    district_code = pd.read_csv('./documents/district_code_src/district_code.csv', encoding='cp949')
+    district_code = pd.read_csv('./docs/district_code_src/district_code.csv', encoding='cp949')
     district_code = district_code.where(pd.notnull(district_code), None)
     district_code = district_code.values.tolist()
 
-    total_district_code = pd.read_csv('./documents/district_code_src/total_district_code.csv', encoding='cp949')
+    total_district_code = pd.read_csv('./docs/district_code_src/total_district_code.csv', encoding='cp949')
     total_district_code = total_district_code.where((pd.notnull(total_district_code)), None)
     total_district_code = total_district_code.values.tolist()
     dbm.insert_data('district_code', district_code)
